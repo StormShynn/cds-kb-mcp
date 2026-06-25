@@ -195,12 +195,8 @@ export function resolveDataSource(argv = process.argv.slice(2)) {
   const remote = getFlag('--remote') || process.env.CDS_KB_REMOTE;
   if (remote) return new RemoteDataSource(remote);
 
-  throw new Error(
-    'No data source. Provide one of:\n' +
-    '  --data <path-to-cloned-data-repo>     (CDS_KB_DATA env)\n' +
-    '  --remote <raw-github-base-url>        (CDS_KB_REMOTE env)\n' +
-    'e.g. --remote https://raw.githubusercontent.com/<user>/cds-kb-data/main',
-  );
+  const defaultRemote = 'https://raw.githubusercontent.com/truongdva2/cds-kb-data/main';
+  return new RemoteDataSource(defaultRemote);
 }
 
 // Export for server use
