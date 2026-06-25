@@ -1,12 +1,10 @@
 # cds-kb-mcp
 
-A **dataless** MCP server that gives AI agents access to **7,355 SAP S/4HANA CDS views** via
-semantic search. Ships **no view data** — you point it at the data either locally or remotely.
+A **dataless** MCP server that gives AI agents access to **7,355 SAP S/4HANA CDS views** via semantic search and structured taxonomy. Ships **no view data** — you point it at the data either locally or it automatically fetches from GitHub.
 
-The whole server bundles into **one file** (`dist/cds-kb-mcp.mjs`, ~784 KB) that runs on
-any machine with Node ≥ 18.
+The whole server bundles into **one file** (`dist/cds-kb-mcp.mjs`, ~784 KB) that runs on any machine with Node ≥ 18.
 
-Works with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, and any MCP-compatible client.
+Works perfectly with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, and any MCP-compatible client.
 
 ---
 
@@ -17,7 +15,7 @@ Works with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, and any MCP
 - [Data Source Configuration](#data-source-configuration)
 - [Tools Reference](#tools-reference)
 - [Client Registration](#client-registration)
-- [Data Enrichment](#data-enrichment)
+- [Data Enrichment & Taxonomy](#data-enrichment--taxonomy)
 - [Architecture](#architecture)
 - [Environment Variables](#environment-variables)
 - [Troubleshooting](#troubleshooting)
@@ -26,16 +24,27 @@ Works with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, and any MCP
 
 ## Quick Start
 
+### 1. Zero-Config Run (Online Mode)
+The absolute easiest way to start. It will automatically download the search index and fetch views on-demand from the official GitHub repository.
+
 ```bash
-# 1. Clone both repos
 git clone https://github.com/truongdva2/cds-kb-mcp.git
-git clone https://github.com/truongdva2/cds_knowledge_base.git cds-kb-data
+cd cds-kb-mcp
 
-# 2. Run the server (no npm install needed — dist/ is pre-built)
-node cds-kb-mcp/dist/cds-kb-mcp.mjs --data ./cds-kb-data
+# Run without any arguments! Defaults to online remote mode.
+node dist/cds-kb-mcp.mjs
+```
 
-# Or run from remote (no data clone needed)
-node cds-kb-mcp/dist/cds-kb-mcp.mjs --remote https://raw.githubusercontent.com/truongdva2/cds_knowledge_base/main
+### 2. Local Data Run (Offline Mode)
+For the fastest, zero-latency experience.
+
+```bash
+# Clone the server and the data repo
+git clone https://github.com/truongdva2/cds-kb-mcp.git
+git clone --recurse-submodules https://github.com/truongdva2/cds-kb-mcp.git # Or clone cds-kb-data manually
+
+# Run pointing to the local data folder
+node dist/cds-kb-mcp.mjs --data ./cds-kb-data
 ```
 
 ---
@@ -63,39 +72,23 @@ npm run build    # → dist/cds-kb-mcp.mjs (~784 KB, self-contained)
 ### Prerequisites
 
 - **Node.js ≥ 18** (uses native `fetch`, ES modules)
-- No other runtime dependencies — everything is bundled into the single file
+- No other runtime dependencies — everything is bundled into the single file.
 
 ---
 
 ## Data Source Configuration
 
-The server needs a data source. It resolves in this precedence order — **local wins when both are set**:
+The server resolves its data source in the following precedence order. **Local wins when both are set**. If nothing is provided, it safely defaults to **Remote (Online)** mode.
 
 | Priority | Flag | Env Var | Mode |
 |---|---|---|---|
 | 1 | `--data <path>` | `CDS_KB_DATA` | **Local** — reads a cloned data repo. Offline, fastest. |
-| 2 | `--remote <url>` | `CDS_KB_REMOTE` | **Remote** — downloads index once, lazy-fetches views, cached to `~/.cache/cds-kb/`. |
+| 2 | `--remote <url>` | `CDS_KB_REMOTE` | **Remote** — downloads index once, lazy-fetches views, cached. |
+| 3 | *(None)* | *(None)* | **Default Remote** — automatically points to `https://raw.githubusercontent.com/truongdva2/cds-kb-data/main`. |
 
-### Local mode (recommended for development)
+### Remote mode caching
 
-```bash
-# Clone the data repo
-git clone https://github.com/truongdva2/cds_knowledge_base.git /path/to/cds-kb-data
-
-# Run with local data
-node dist/cds-kb-mcp.mjs --data /path/to/cds-kb-data
-```
-
-**Advantages:** Offline, instant file reads, no network latency.
-
-### Remote mode (zero-clone setup)
-
-```bash
-node dist/cds-kb-mcp.mjs --remote https://raw.githubusercontent.com/truongdva2/cds_knowledge_base/main
-```
-
-**How it works:**
-1. Downloads `search_index.json` (~4.7 MB) once → cached to `~/.cache/cds-kb/<hash>/`
+1. Downloads `search_index.json` (~5 MB) and `taxonomy.json` once → cached to `~/.cache/cds-kb/<hash>/`
 2. Individual views fetched on-demand when `get_cds_view` is called → also cached
 3. Cache auto-expires after **24 hours** (configurable via `CDS_KB_CACHE_TTL_HOURS`)
 4. Force re-download: set `CDS_KB_REFRESH=1`
@@ -104,11 +97,11 @@ node dist/cds-kb-mcp.mjs --remote https://raw.githubusercontent.com/truongdva2/c
 
 ## Tools Reference
 
-The server exposes **4 MCP tools**:
+The server exposes **5 highly optimized MCP tools**:
 
-### `search_cds`
+### 1. `search_cds`
 
-Search CDS views by business meaning, name, or tags. Returns a ranked shortlist.
+Search CDS views by business meaning, name, or traditional SAP keywords (e.g. `VBAK`). Returns a ranked shortlist.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -119,26 +112,58 @@ Search CDS views by business meaning, name, or tags. Returns a ranked shortlist.
 | `limit` | number | ❌ | Max results, 1–50 (default: 10) |
 
 **Examples:**
-```
-search_cds("purchase order")
+```javascript
+// Search by natural language
 search_cds("overdue customer invoices", module="Finance")
-search_cds("journal entry", module="FI", limit=5)
+
+// Search by traditional SAP T-Codes or Table Names (thanks to Synonym Enrichment!)
+search_cds("VBAK") 
+search_cds("BSEG")
+
+// Search with specific BO filter
 search_cds("material stock", bo="Inventory")
 ```
 
-**Module aliases** — you can use natural names instead of codes:
+### 2. `get_taxonomy`
 
-| Natural name | Code | Natural name | Code |
+Retrieves the semantic map of the knowledge base. It groups all views into **Lines of Business (LOB)** and **Business Objects (BO)**, providing rich keywords. 
+
+Use this to understand how data is organized before searching, or to discover valid tags for `get_views_by_tag`.
+
+| Parameter | Type | Required | Description |
 |---|---|---|---|
-| Finance, Accounting | FI | Sales, Distribution | SD |
-| Procurement, Purchasing | MM | Production, Manufacturing | PP |
-| Controlling | CO | Plant Maintenance | PM |
-| Quality Management | QM | Logistics | LE |
-| Transportation | TM | Supply Chain | SCM |
-| Real Estate | RE | Project Management | PPM |
-| CRM | CRM | Basis | BC |
+| *(none)* | — | — | — |
 
-### `get_cds_view`
+**Example output:**
+```markdown
+SAP CDS Knowledge Base Taxonomy
+
+## Lines of Business (12)
+- **lob:finance** (finance) — Keywords: FI, FIN, General Ledger, Accounts Payable, Asset Accounting, Tax...
+- **lob:sales & distribution** (sales & distribution) — Keywords: SD, Sales Order, Billing, Pricing...
+
+## Business Objects (829 total, sample of 30)
+- **bo:salesorder** — Keywords: SO, SD-SLS, Customer Order, VBAK
+- **bo:journalentry** — Keywords: FI-GL, BSEG, BKPF, Accounting Document
+...
+```
+
+### 3. `get_views_by_tag`
+
+Retrieve a deterministic, paginated list of all CDS views that possess a specific tag (e.g., `bo:salesorder` or `lob:finance`). Use this to accurately browse a category without relying on semantic search.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `tag` | string | ✅ | The exact tag to filter by, e.g., "bo:salesorder" |
+| `limit` | number | ❌ | Max results (default 50) |
+
+**Examples:**
+```javascript
+get_views_by_tag("bo:salesorder")
+get_views_by_tag("lob:controlling")
+```
+
+### 4. `get_cds_view`
 
 Return the full (or partial) markdown definition of one CDS view.
 
@@ -150,46 +175,17 @@ Return the full (or partial) markdown definition of one CDS view.
 **Available sections:** `metadata`, `fields`, `associations`, `source`
 
 **Examples:**
-```
-get_cds_view("I_PurchaseOrderAPI01")                       # full view
-get_cds_view("I_PurchaseOrderAPI01", sections=["metadata", "fields"])  # 62% smaller
-get_cds_view("C_PURCHASEORDERDEX", sections=["source"])    # DDL only
-```
-
-> **💡 Token savings:** For large views (some are 50–95 KB), using `sections` can save
-> **60–80%** of tokens. Always use `["metadata", "fields"]` first, then fetch `source`
-> only if needed.
-
-### `list_modules`
-
-List all SAP modules with view counts and business objects. Use before searching to discover what's available.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| *(none)* | — | — | — |
-
-**Example output:**
-```
-SAP Modules (31 modules, 7355 total views):
-
-- FI (1136 views) — Finance  BOs: Asset, Bank, Customer, JournalEntry, Supplier, ...
-- SD (759 views) — Sales & Distribution  BOs: BillingDocument, Customer, SalesOrder, ...
-- MM (547 views) — Sourcing & Procurement  BOs: Material, PurchaseOrder, Supplier, ...
-...
+```javascript
+get_cds_view("I_PurchaseOrderAPI01")                       // full view
+get_cds_view("I_PurchaseOrderAPI01", sections=["metadata", "fields"])  // 62% smaller, recommended!
+get_cds_view("C_PURCHASEORDERDEX", sections=["source"])    // DDL source code only
 ```
 
-### `kb_info`
+> **💡 Token savings:** For large views (some are 50–95 KB), using `sections` can save **60–80%** of context window tokens. Always use `["metadata", "fields"]` first to understand the view structure!
+
+### 5. `kb_info`
 
 Report the active data source, view count, enrichment coverage, and index build time.
-
-**Example output:**
-```
-source: local:/path/to/cds-kb-data
-views: 7355
-enriched: 7160
-modules: 31
-builtAt: 2026-06-25T09:01:31.059Z
-```
 
 ---
 
@@ -198,11 +194,11 @@ builtAt: 2026-06-25T09:01:31.059Z
 ### Claude Code
 
 ```bash
+# Zero-config (Online Default)
+claude mcp add cds-kb -- node /abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs
+
 # Local data
 claude mcp add cds-kb -- node /abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs --data /abs/path/to/cds-kb-data
-
-# Remote data
-claude mcp add cds-kb -- node /abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs --remote https://raw.githubusercontent.com/truongdva2/cds_knowledge_base/main
 ```
 
 ### Claude Desktop
@@ -215,9 +211,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "cds-kb": {
       "command": "node",
       "args": [
-        "/abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs",
-        "--data",
-        "/abs/path/to/cds-kb-data"
+        "/abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs"
       ]
     }
   }
@@ -233,55 +227,30 @@ Add via the IDE's MCP settings UI:
 | Setting | Value |
 |---|---|
 | **Command** | `node` |
-| **Args** | `["/abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs", "--data", "/abs/path/to/cds-kb-data"]` |
-
-Or for remote mode:
-
-| Setting | Value |
-|---|---|
-| **Command** | `node` |
-| **Args** | `["/abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs", "--remote", "https://raw.githubusercontent.com/truongdva2/cds_knowledge_base/main"]` |
-
-### Generic MCP Client
-
-The server uses **stdio transport** (stdin/stdout JSON-RPC). Any MCP-compatible client that
-supports stdio can connect:
-
-```bash
-node /path/to/dist/cds-kb-mcp.mjs --data /path/to/cds-kb-data
-```
+| **Args** | `["/abs/path/to/cds-kb-mcp/dist/cds-kb-mcp.mjs"]` |
 
 ---
 
-## Data Enrichment
+## Data Enrichment & Taxonomy
 
-The search index ships with **7,160 enriched views** (97.3%) that have human-readable
-`semanticDescription` extracted from `@EndUserText.label` annotations in DDL source.
+The search index ships with **7,160 enriched views** (97.3%) that have human-readable `semanticDescription` extracted from `@EndUserText.label` annotations in DDL source.
+
+It also integrates a curated **Taxonomy** (`taxonomy.json`). When the index is built, keywords like `VBAK`, `EKKO`, `BSEG` are dynamically injected into a `synonyms` field for the relevant Business Objects. This allows AI to search using traditional SAP terminology even if those words aren't in the official view descriptions!
 
 ### Re-run enrichment after data updates
 
 ```bash
 cd cds-kb-mcp
 node enrich_index.mjs /path/to/cds-kb-data
+npm run build
 ```
 
 This will:
 1. Scan all 7,355 view files for `@EndUserText.label`
 2. Populate `semanticDescription` field in the index
-3. Improve `description` field where it was just name-derived
-4. Extract tags from YAML frontmatter
-5. Rebuild the MiniSearch index from scratch
-6. Create a `.bak` backup of the original index
-
-### Rebuild from scratch (after adding new views)
-
-```bash
-# Re-run enrichment — it will pick up any new view files
-node enrich_index.mjs /path/to/cds-kb-data
-
-# Then rebuild the dist bundle
-npm run build
-```
+3. Load `taxonomy.json` and inject keywords into the `synonyms` field for ~6,900 views.
+4. Rebuild the MiniSearch index from scratch.
+5. Create a `.bak` backup of the original index.
 
 ---
 
@@ -298,13 +267,13 @@ npm run build
 │              cds-kb-mcp (this repo)                  │
 │                                                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │  search_cds  │  │ get_cds_view │  │list_modules│ │
+│  │  search_cds  │  │ get_cds_view │  │get_taxonomy│ │
 │  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
 │         │                 │                 │        │
 │         ▼                 ▼                 ▼        │
 │  ┌──────────────────────────────────────────────┐   │
 │  │          MiniSearch (in-memory BM25)          │   │
-│  │  boost: name(3x) semantic(2.5x) tags(1.5x)  │   │
+│  │  boost: name(3x) semantic(2.5x) synonyms(2x)  │   │
 │  └──────────────────────┬───────────────────────┘   │
 │                         │                            │
 │  ┌──────────────────────▼───────────────────────┐   │
@@ -316,9 +285,10 @@ npm run build
                           │
                           ▼
 ┌─────────────────────────────────────────────────────┐
-│            cds-kb-data (separate repo)               │
+│             cds-kb-data (separate repo)              │
 │                                                      │
-│  index/search_index.json    (~4.7 MB, self-desc.)   │
+│  index/taxonomy.json        (LOBs, BOs, Keywords)   │
+│  index/search_index.json    (~5 MB, self-desc.)     │
 │  views/*.md                 (7,355 CDS view files)  │
 └─────────────────────────────────────────────────────┘
 ```
@@ -328,11 +298,11 @@ npm run build
 | Decision | Rationale |
 |---|---|
 | **Data/code separation** | Data updates independently of server code |
-| **Self-describing index** | Options embedded in JSON → zero schema coupling |
-| **Section-based retrieval** | `get_cds_view(sections)` saves 60–80% tokens |
-| **Module alias mapping** | AI agents can use "Finance" instead of "FI" |
+| **Taxonomy Routing** | Deterministic browsing via `get_taxonomy` & `get_views_by_tag` without file bloat |
+| **Synonym Injection** | Allows searching for traditional SAP T-Codes/Tables (e.g. `VBAK`) |
+| **Section-based retrieval** | `get_cds_view(sections)` saves 60–80% tokens per read |
 | **Single-file bundle** | `dist/cds-kb-mcp.mjs` — no install needed on target |
-| **Local-first** | Local data wins when both sources configured |
+| **Zero-config Remote** | Defaults to fetching from GitHub online automatically |
 | **Cache with TTL** | Remote cache auto-refreshes every 24h |
 
 ---
@@ -342,32 +312,13 @@ npm run build
 | Variable | Default | Description |
 |---|---|---|
 | `CDS_KB_DATA` | — | Path to local data repo (alternative to `--data`) |
-| `CDS_KB_REMOTE` | — | Raw GitHub URL (alternative to `--remote`) |
+| `CDS_KB_REMOTE` | `https://.../main` | Raw GitHub URL (alternative to `--remote`) |
 | `CDS_KB_REFRESH` | `0` | Set to `1` to force re-download of remote index |
 | `CDS_KB_CACHE_TTL_HOURS` | `24` | Cache expiry for remote mode (in hours) |
 
 ---
 
 ## Troubleshooting
-
-### Server won't start
-
-```
-Error: No data source. Provide one of:
-  --data <path>    or    --remote <url>
-```
-
-**Fix:** Provide either `--data` or `--remote` flag. See [Data Source Configuration](#data-source-configuration).
-
-### "Index file is not in the expected self-describing format"
-
-The `search_index.json` file is missing or corrupted.
-
-**Fix:**
-```bash
-# Re-run enrichment to rebuild
-node enrich_index.mjs /path/to/cds-kb-data
-```
 
 ### Search returns poor results
 
@@ -382,12 +333,12 @@ node enrich_index.mjs /path/to/cds-kb-data
 
 ```bash
 # Force re-download
-CDS_KB_REFRESH=1 node dist/cds-kb-mcp.mjs --remote <url>
+CDS_KB_REFRESH=1 node dist/cds-kb-mcp.mjs
 ```
 
 ### View not found
 
-View names are **case-insensitive** but must be exact. Use `search_cds` first to find the correct name.
+View names are **case-insensitive** but must be exact. Use `search_cds` or `get_views_by_tag` first to find the correct name.
 
 ---
 
@@ -400,6 +351,7 @@ cds-kb-mcp/
 │   └── datasource.mjs    # Data access layer (Local + Remote backends)
 ├── dist/
 │   └── cds-kb-mcp.mjs    # Pre-built single-file bundle (~784 KB)
+├── cds-kb-data/          # Git submodule (if cloned with --recurse-submodules)
 ├── build.mjs             # esbuild bundler config
 ├── enrich_index.mjs      # Index enrichment script
 ├── test_tools.mjs        # Integration smoke tests
