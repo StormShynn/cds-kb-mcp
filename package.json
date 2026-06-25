@@ -1,0 +1,21 @@
+{
+  "name": "cds-kb-mcp",
+  "version": "1.0.0",
+  "description": "Dataless MCP server for the SAP CDS knowledge base (local or remote data source).",
+  "type": "module",
+  "bin": {
+    "cds-kb-mcp": "dist/cds-kb-mcp.mjs"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "minisearch": "^7.2.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
