@@ -22913,6 +22913,45 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+var SECTION_NAMES = ["metadata", "fields", "associations", "source"];
+function parseViewSections(md) {
+  const sections = { metadata: "", fields: "", associations: "", source: "" };
+  const fmEnd = md.indexOf("---", 4);
+  const fieldsStart = md.indexOf("## Fields");
+  if (fieldsStart === -1) {
+    sections.metadata = md;
+    return sections;
+  }
+  sections.metadata = md.slice(0, fieldsStart).trimEnd();
+  const assocStart = md.indexOf("## Associations");
+  const sourceStart = md.indexOf("## Source Code");
+  const fieldsEnd = assocStart !== -1 ? assocStart : sourceStart !== -1 ? sourceStart : md.length;
+  sections.fields = md.slice(fieldsStart, fieldsEnd).trimEnd();
+  if (assocStart !== -1) {
+    const assocEnd = sourceStart !== -1 ? sourceStart : md.length;
+    sections.associations = md.slice(assocStart, assocEnd).trimEnd();
+  }
+  if (sourceStart !== -1) {
+    sections.source = md.slice(sourceStart).trimEnd();
+  }
+  return sections;
+}
+function filterSections(md, requestedSections) {
+  if (!requestedSections || requestedSections.length === 0) return md;
+  const valid = requestedSections.filter((s) => SECTION_NAMES.includes(s));
+  if (valid.length === 0) return md;
+  const parsed = parseViewSections(md);
+  return valid.map((s) => parsed[s]).filter(Boolean).join("\n\n");
+}
+var CACHE_TTL_MS = (parseInt(process.env.CDS_KB_CACHE_TTL_HOURS, 10) || 24) * 60 * 60 * 1e3;
+async function isCacheFresh(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    return Date.now() - stat.mtimeMs < CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
 var LocalDataSource = class {
   constructor(rootDir) {
     this.root = path.resolve(rootDir);
@@ -22932,6 +22971,18 @@ var LocalDataSource = class {
     const safe = path.basename(name).replace(/\.md$/i, "").toUpperCase();
     const file = path.join(this.root, "views", `${safe}.md`);
     return fs.readFile(file, "utf-8");
+  }
+  async getViewSections(name, sections) {
+    const md = await this.getView(name);
+    return filterSections(md, sections);
+  }
+  async getTaxonomy() {
+    const file = path.join(this.root, "index", "taxonomy.json");
+    try {
+      return JSON.parse(await fs.readFile(file, "utf-8"));
+    } catch {
+      return null;
+    }
   }
 };
 var RemoteDataSource = class {
@@ -22953,7 +23004,10 @@ var RemoteDataSource = class {
     const cacheFile = path.join(this.cacheDir, "search_index.json");
     if (process.env.CDS_KB_REFRESH !== "1") {
       try {
-        return JSON.parse(await fs.readFile(cacheFile, "utf-8"));
+        if (await isCacheFresh(cacheFile)) {
+          return JSON.parse(await fs.readFile(cacheFile, "utf-8"));
+        }
+        console.error("[cds-kb-mcp] index cache expired, re-downloading...");
       } catch {
       }
     }
@@ -22974,6 +23028,28 @@ var RemoteDataSource = class {
     await fs.writeFile(cacheFile, md, "utf-8");
     return md;
   }
+  async getViewSections(name, sections) {
+    const md = await this.getView(name);
+    return filterSections(md, sections);
+  }
+  async getTaxonomy() {
+    const cacheFile = path.join(this.cacheDir, "taxonomy.json");
+    if (process.env.CDS_KB_REFRESH !== "1") {
+      try {
+        if (await isCacheFresh(cacheFile)) {
+          return JSON.parse(await fs.readFile(cacheFile, "utf-8"));
+        }
+      } catch {
+      }
+    }
+    try {
+      const text = await this.#fetchText(`${this.base}/index/taxonomy.json`);
+      await fs.writeFile(cacheFile, text, "utf-8");
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
 };
 function resolveDataSource(argv = process.argv.slice(2)) {
   const getFlag = (name) => {
@@ -22991,13 +23067,65 @@ function resolveDataSource(argv = process.argv.slice(2)) {
 
 // src/server.mjs
 var SEARCH_OPTIONS = {
-  boost: { name: 3, semanticDescription: 2.5, tagText: 1.5, description: 1, appComponent: 1 },
+  boost: { name: 3, semanticDescription: 2.5, synonyms: 2, tagText: 1.5, description: 1, appComponent: 1 },
   prefix: true,
   fuzzy: 0.2
 };
+var MODULE_ALIASES = {
+  finance: "FI",
+  financial: "FI",
+  accounting: "FI",
+  sales: "SD",
+  "sales & distribution": "SD",
+  distribution: "SD",
+  procurement: "MM",
+  purchasing: "MM",
+  materials: "MM",
+  "material management": "MM",
+  production: "PP",
+  manufacturing: "PP",
+  "production planning": "PP",
+  controlling: "CO",
+  "cost controlling": "CO",
+  "plant maintenance": "PM",
+  maintenance: "PM",
+  "quality management": "QM",
+  quality: "QM",
+  logistics: "LE",
+  "logistics execution": "LE",
+  warehouse: "LE",
+  "warehouse management": "LE",
+  "project management": "PPM",
+  project: "PPM",
+  "real estate": "RE",
+  realestate: "RE",
+  "supply chain": "SCM",
+  scm: "SCM",
+  "transportation management": "TM",
+  transportation: "TM",
+  transport: "TM",
+  crm: "CRM",
+  "customer relationship": "CRM",
+  basis: "BC",
+  "basis components": "BC",
+  "cross application": "CA",
+  cross: "CA",
+  sustainability: "SUS",
+  plm: "PLM",
+  "product lifecycle": "PLM",
+  "environment health safety": "EHS",
+  ehs: "EHS"
+};
+function resolveModule(input) {
+  if (!input) return void 0;
+  const lower = input.toLowerCase().trim();
+  return MODULE_ALIASES[lower] || input.toUpperCase();
+}
 var ds = resolveDataSource();
 var mini;
 var meta = {};
+var moduleStats = {};
+var taxonomyData = null;
 async function loadIndex() {
   const w = await ds.loadIndexWrapper();
   if (!w || !w.minisearch || !w.options) {
@@ -23005,31 +23133,48 @@ async function loadIndex() {
   }
   mini = MiniSearch.loadJSON(w.minisearch, w.options);
   meta = { viewCount: w.viewCount, enrichedCount: w.enrichedCount, builtAt: w.builtAt };
+  const allDocs = mini.search("", { prefix: false, fuzzy: false });
+  const ms = JSON.parse(w.minisearch);
+  const stored = ms.storedFields || {};
+  const stats = {};
+  for (const doc of Object.values(stored)) {
+    const mod = doc.module || "UNKNOWN";
+    if (!stats[mod]) stats[mod] = { count: 0, lob: doc.lob || "", bos: /* @__PURE__ */ new Set() };
+    stats[mod].count++;
+    if (doc.bo) stats[mod].bos.add(doc.bo);
+  }
+  for (const v of Object.values(stats)) {
+    v.bos = [...v.bos].sort();
+  }
+  moduleStats = stats;
+  taxonomyData = await ds.getTaxonomy();
 }
-var server = new McpServer({ name: "cds-knowledge-base", version: "1.0.0" });
+var server = new McpServer({ name: "cds-knowledge-base", version: "1.1.0" });
 server.registerTool(
   "search_cds",
   {
     title: "Search SAP CDS views",
-    description: "Search SAP S/4HANA released CDS views by business meaning / name / tags. Returns a ranked shortlist (name + path + description). Use this INSTEAD of grepping or reading routers, then call get_cds_view to read one. Optionally filter by module (FI, SD, MM...), lob, or bo.",
+    description: 'Search SAP S/4HANA released CDS views by business meaning / name / tags. Returns a ranked shortlist (name + path + description). Use this INSTEAD of grepping or reading routers, then call get_cds_view to read one. Optionally filter by module (FI, SD, MM... or natural names like "Finance", "Procurement"), lob, or bo.',
     inputSchema: {
       query: external_exports.string().describe('Natural-language or keyword query, e.g. "overdue customer invoices"'),
-      module: external_exports.string().optional().describe("Module code filter, e.g. FI, SD, MM, PP"),
-      lob: external_exports.string().optional().describe('Line-of-business filter, e.g. "Finance"'),
-      bo: external_exports.string().optional().describe('Business object filter, e.g. "salesorder"'),
-      limit: external_exports.number().int().min(1).max(50).optional().describe("Max results (default 8)")
+      module: external_exports.string().optional().describe('Module filter \u2014 code (FI, SD, MM) or name ("Finance", "Procurement")'),
+      lob: external_exports.string().optional().describe('Line-of-business filter, e.g. "Finance" (partial match)'),
+      bo: external_exports.string().optional().describe('Business object filter, e.g. "salesorder" (partial match)'),
+      limit: external_exports.number().int().min(1).max(50).optional().describe("Max results (default 10)")
     }
   },
-  async ({ query, module, lob, bo, limit = 8 }) => {
-    const eq = (a, b) => (a || "").toLowerCase() === (b || "").toLowerCase();
-    const facetFilter = (r) => (!module || eq(r.module, module)) && (!lob || eq(r.lob, lob)) && (!bo || eq(r.bo, bo));
+  async ({ query, module, lob, bo, limit = 10 }) => {
+    const resolvedModule = resolveModule(module);
+    const contains = (a, b) => (a || "").toLowerCase().includes((b || "").toLowerCase());
+    const facetFilter = (r) => (!resolvedModule || (r.module || "").toUpperCase() === resolvedModule) && (!lob || contains(r.lob, lob)) && (!bo || contains(r.bo, bo));
     const results = mini.search(query, { ...SEARCH_OPTIONS, filter: facetFilter }).slice(0, limit);
     if (results.length === 0) {
-      return { content: [{ type: "text", text: `No CDS views matched "${query}"${module ? ` (module=${module})` : ""}.` }] };
+      const hint = resolvedModule ? ` (module=${resolvedModule})` : "";
+      return { content: [{ type: "text", text: `No CDS views matched "${query}"${hint}. Try broader terms or remove filters.` }] };
     }
     const lines = results.map((r, i) => {
       const desc = r.semanticDescription || r.description || "";
-      return `${i + 1}. ${r.name}  [${r.appComponent || r.module || "-"}]  (score ${r.score.toFixed(1)})
+      return `${i + 1}. **${r.name}**  [${r.appComponent || r.module || "-"}]  (score ${r.score.toFixed(1)})
    ${desc}
    path: ${r.path}`;
     });
@@ -23038,7 +23183,7 @@ server.registerTool(
 
 ${lines.join("\n")}
 
-Use get_cds_view(name) to read the full definition.` }]
+Use get_cds_view(name) to read the full definition, or get_cds_view(name, sections) for specific parts.` }]
     };
   }
 );
@@ -23046,18 +23191,98 @@ server.registerTool(
   "get_cds_view",
   {
     title: "Get a CDS view definition",
-    description: "Return the full markdown (fields, associations, DDL source) of one CDS view by its exact name.",
-    inputSchema: { name: external_exports.string().describe("Exact view name, e.g. I_SalesDocument (case-insensitive)") }
+    description: "Return markdown of one CDS view by its exact name. By default returns ALL sections. Use the sections parameter to retrieve only what you need (saves tokens for large views). Available sections: metadata, fields, associations, source.",
+    inputSchema: {
+      name: external_exports.string().describe("Exact view name, e.g. I_SalesDocument (case-insensitive)"),
+      sections: external_exports.array(external_exports.enum(["metadata", "fields", "associations", "source"])).optional().describe("Which sections to return. Omit for all. Options: metadata, fields, associations, source")
+    }
   },
-  async ({ name }) => {
+  async ({ name, sections }) => {
     try {
-      return { content: [{ type: "text", text: await ds.getView(name) }] };
+      const text = sections && sections.length > 0 ? await ds.getViewSections(name, sections) : await ds.getView(name);
+      return { content: [{ type: "text", text }] };
     } catch {
       return {
         content: [{ type: "text", text: `View "${name}" not found. Use search_cds first to get the exact name.` }],
         isError: true
       };
     }
+  }
+);
+server.registerTool(
+  "get_taxonomy",
+  {
+    title: "Get knowledge base taxonomy",
+    description: "Returns the semantic map of the knowledge base (Lines of Business -> Business Objects -> Keywords). Use this to understand how data is organized before searching, or to discover valid tags for get_views_by_tag. Provides rich keywords and synonyms that can help formulate better search queries.",
+    inputSchema: {}
+  },
+  async () => {
+    if (taxonomyData && taxonomyData.lobs && taxonomyData.bos) {
+      const lobLines = taxonomyData.lobs.map((l) => `- **${l.tag}** (${l.name}) \u2014 Keywords: ${l.keywords.join(", ")}`);
+      const boSample = taxonomyData.bos.slice(0, 30).map((b) => `  - **${b.tag}** \u2014 Keywords: ${b.keywords.join(", ")}`);
+      const text = `SAP CDS Knowledge Base Taxonomy
+
+## Lines of Business (${taxonomyData.lobs.length})
+${lobLines.join("\n")}
+
+## Business Objects (${taxonomyData.bos.length} total, sample of 30)
+${boSample.join("\n")}
+
+Use get_views_by_tag(tag) to list all views for a specific tag (e.g. "bo:salesorder").`;
+      return { content: [{ type: "text", text }] };
+    }
+    const sorted = Object.entries(moduleStats).sort((a, b) => b[1].count - a[1].count);
+    const lines = sorted.map(([mod, info]) => {
+      const boList = info.bos.length > 0 ? `  BOs: ${info.bos.join(", ")}` : "";
+      return `- **${mod}** (${info.count} views) \u2014 ${info.lob}${boList}`;
+    });
+    return {
+      content: [{ type: "text", text: `SAP Modules (${sorted.length} modules, ${meta.viewCount} total views):
+
+${lines.join("\n")}` }]
+    };
+  }
+);
+server.registerTool(
+  "get_views_by_tag",
+  {
+    title: "Get views by tag",
+    description: 'Retrieve a paginated list of all CDS views that possess a specific tag (e.g., "bo:salesorder" or "lob:finance"). This is a deterministic way to browse the knowledge base when search_cds is too broad. Use get_taxonomy to discover available tags.',
+    inputSchema: {
+      tag: external_exports.string().describe('The exact tag to filter by, e.g. "bo:salesorder"'),
+      limit: external_exports.number().int().min(1).max(200).optional().describe("Max results (default 50)")
+    }
+  },
+  async ({ tag, limit = 50 }) => {
+    const parts = tag.split(":");
+    let filterFn = () => false;
+    if (parts.length === 2) {
+      const [type, value] = [parts[0].toLowerCase(), parts[1].toLowerCase()];
+      if (type === "lob") {
+        filterFn = (r) => (r.lob || "").toLowerCase() === value;
+      } else if (type === "bo") {
+        filterFn = (r) => (r.bo || "").toLowerCase() === value;
+      } else {
+        filterFn = (r) => (r.tagText || "").toLowerCase().includes(tag.toLowerCase());
+      }
+    } else {
+      filterFn = (r) => (r.tagText || "").toLowerCase().includes(tag.toLowerCase());
+    }
+    const results = mini.search(MiniSearch.wildcard, { filter: filterFn }).slice(0, limit);
+    if (results.length === 0) {
+      return { content: [{ type: "text", text: `No views found for tag "${tag}". Use get_taxonomy to find valid tags.` }] };
+    }
+    const lines = results.map((r, i) => {
+      const desc = r.semanticDescription || r.description || "";
+      return `${i + 1}. **${r.name}**
+   ${desc}
+   path: ${r.path}`;
+    });
+    return {
+      content: [{ type: "text", text: `Found ${results.length} CDS views for tag "${tag}":
+
+${lines.join("\n")}` }]
+    };
   }
 );
 server.registerTool(
@@ -23071,13 +23296,14 @@ server.registerTool(
     content: [{ type: "text", text: `source: ${ds.describe()}
 views: ${meta.viewCount ?? "?"}
 enriched: ${meta.enrichedCount ?? "?"}
+modules: ${Object.keys(moduleStats).length}
 builtAt: ${meta.builtAt ?? "?"}` }]
   })
 );
 async function main() {
   await loadIndex();
   await server.connect(new StdioServerTransport());
-  console.error(`[cds-kb-mcp] ready. ${ds.describe()} | views=${meta.viewCount} enriched=${meta.enrichedCount}`);
+  console.error(`[cds-kb-mcp] ready. ${ds.describe()} | views=${meta.viewCount} enriched=${meta.enrichedCount} modules=${Object.keys(moduleStats).length}`);
 }
 main().catch((e) => {
   console.error("[cds-kb-mcp] fatal:", e.message);
