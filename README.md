@@ -10,6 +10,7 @@ Works perfectly with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, a
 
 ## Table of Contents
 
+- [Benchmark vs. File-based KB](#benchmark-vs-file-based-kb)
 - [Quick Start](#quick-start)
 - [Installation](#installation)
 - [Data Source Configuration](#data-source-configuration)
@@ -19,6 +20,70 @@ Works perfectly with **Claude Desktop**, **Claude Code**, **Antigravity IDE**, a
 - [Architecture](#architecture)
 - [Environment Variables](#environment-variables)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## Benchmark vs. File-based KB
+
+Head-to-head comparison against the naive approach — letting an AI agent grep + read raw markdown files from the same knowledge base (7,355 CDS views, identical data).
+
+**Use case:** find CDS views to build an **AR/AP aging & open-items report** (covers customer/vendor open items, aging buckets, document line items, clearing). 5-query suite, top-10 per query, plus a follow-up `get_cds_view` on the top hit.
+
+### Results
+
+| Metric | File-based (grep + read) | **cds-kb-mcp** | Ratio |
+|---|---:|---:|---:|
+| Wall-clock time | 15,763 ms | **19 ms** | **~830× faster** |
+| Total tokens (end-to-end) | 434,937 | **4,638** | **~94× cheaper** |
+| Setup tokens (one-shot) | 59,816 (README + taxonomy) | 0 | — |
+| Per-query tokens (avg) | ~74,900 | ~785 + ~490 follow-up | ~58× |
+| Precision @ top-3 (qualitative) | 2 / 5 | **4–5 / 5** | — |
+
+### Per-query breakdown
+
+| Query | File method (KB read / tokens) | MCP (search out / follow-up) |
+|---|---:|---:|
+| AR open items | 448.7 KB / ~114,859 tok | 403 tok / 482 tok |
+| AP open items | 336.3 KB / ~86,100 tok | 402 tok / 482 tok |
+| Aging / overdue | 490.0 KB / ~125,439 tok | 382 tok / 169 tok |
+| Clearing line items | 153.3 KB / ~39,243 tok | 363 tok / 168 tok |
+| BP master data | 35.6 KB / ~9,114 tok | 368 tok / 1,152 tok |
+
+### Quality — top-3 views surfaced
+
+| Query | File-based top-3 | cds-kb-mcp top-3 |
+|---|---|---|
+| AR open items | `I_OPERATIONALACCTGDOCITEM`, `I_GLACCOUNTLINEITEMSEMTAG`, `DCO_I_RBLPYBLTRANSACITEMTP` | `I_ONETIMEACCOUNTCUSTOMER`, `I_PARKEDOPLACCTGDOCRBLSITEM`, **`I_CAOPENITEMLIST`** |
+| AP open items | `I_BR_NFDOCUMENT` (Brazil-specific), `I_PAYMENTTERMSCONDITIONS`, `I_PARKEDOPLACCTGDOCPYBLSITEM` | `I_ONETIMEACCOUNTSUPPLIER`, **`I_PARKEDOPLACCTGDOCPYBLSITEM`**, `I_SUPPLIERINVOICEODN` |
+| Aging / overdue | `I_BILLOFEXCHANGE`, `I_HIERRUNTIMEREPRESENTATION`, `I_FINANCIALSTATEMENTLEAFITEM` | `I_BR_DUETYPE`, `I_BR_DUETYPETEXT`, **`I_CAOVERDUEITEM`** |
+| Clearing | `I_OPLACCTGDOCITEMCLRGHIST`, `I_WITHHOLDINGTAXITEM`, `I_CACLEARINGSTATUSTEXT` | **`I_CACLEARINGSTATUS`**, **`I_CACLEARINGCATEGORY`**, **`I_CACLEARINGINFORMATION`** |
+| BP master | `I_BUSPARTOCCUPATIONTEXT`, `I_BUSINESSPARTNERADDRESSTP_3`, `I_BUSPARTADDRDEPDNTTAXNMBR` | **`I_BUSINESSPARTNERCUSTOMER`**, **`I_CUSTOMER_TO_BUSINESSPARTNER`**, **`I_BUSINESSPARTNER`** |
+
+> The file-based method matches keywords literally — it misses the semantic `I_CAOPENITEMLIST` / `I_CAOVERDUEITEM` views because "open items" and "overdue" never appear together in those filenames. cds-kb-mcp finds them because the index is enriched with `semanticDescription` and `synonyms` (7,160 / 7,355 views enriched).
+
+### Why the gap is this large
+
+1. **Pre-built MiniSearch index** with field boosts (`name×3`, `semanticDescription×2.5`, `synonyms×2`) — the file method has no semantic layer, just literal grep.
+2. **Tool-shaped output** — MCP returns ranked JSON (`name + path + score + description`, ~80 tok/hit). Reading one raw `.md` is 30–60 KB.
+3. **Stateless on the AI side** — the 5.7 MB index lives in the MCP process. The agent never has to ingest the taxonomy or per-view markdown to "orient" itself.
+
+### Reproducing the benchmark
+
+Harness lives in [`bench/`](../bench/) at the repo root:
+
+```bash
+node bench/bench_mcp.mjs    # → bench/result_mcp.json
+node bench/bench_files.mjs  # → bench/result_files.json
+```
+
+Full report with caveats: [`bench/REPORT.md`](../bench/REPORT.md).
+
+### Caveats
+
+- **Token estimate** is `bytes / 4`, not the Anthropic tokenizer — relative ratios are reliable, absolute counts are approximate. _[Unverified]_
+- **Quality scoring is qualitative**, based on SAP S/4HANA naming conventions, not a hand-curated ground truth. _[Inference]_
+- Each method ran **once**; no variance measurement. Cold-start MCP load adds ~100 ms one-time.
+- File-method simulation uses `grep -l`; a smarter grep would not meaningfully cut token cost — the agent still has to read the matching files.
 
 ---
 
