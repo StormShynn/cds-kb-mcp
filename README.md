@@ -559,33 +559,24 @@ The script exercises all five tools and prints sample output.
 
 ### Updating the search index
 
-The MCP itself never builds the index — `cds-kb-data` does. There are two paths.
+The MCP itself never builds the index — that happens in [`cds-kb-data`](https://github.com/truongdva2/cds-kb-data) via a GitHub Action that auto-triggers on every data change. Contributors edit `.md` view files or `index/taxonomy.json`, push, and the bot regenerates `search_index.json` + `version.json` on `main`.
 
-#### Automatic (recommended) — let the GitHub Action handle it
+> **Full contributor guide lives in the data repo:** see [`cds-kb-data/README.md`](https://github.com/truongdva2/cds-kb-data#updating-data--cicd-workflow) — pipeline diagram, the 5-step dev checklist, and 6 common-scenario fixes.
 
-The data repo ships a workflow at `.github/workflows/rebuild-on-push.yml`. It triggers on any push that touches `views/**` or `index/taxonomy.json`, runs `enrich_index.mjs` in CI, and commits the regenerated `search_index.json` + `version.json` back to `main`. You only edit views or the taxonomy — the bot keeps the index in sync.
-
-Pipeline diagram:
+#### Short version (data side)
 
 ```
-You: edit views/X.md   →   git push   →   GitHub Action runs:
-                                              ├ checkout cds-kb-data (full history)
-                                              ├ checkout cds-kb-mcp (for enrich_index.mjs)
-                                              ├ npm install minisearch
-                                              ├ node enrich_index.mjs .
-                                              │     (uses $GITHUB_SHA for version.json)
-                                              └ commit + push index/search_index.json
-                                                              index/version.json
-                                                                                ↓
-                                          MCP clients pick up on next startup
-                                          (version probe → commit mismatch → refresh)
+edit views/X.md  →  git push  →  Action rebuilds  →  bot commits index/* back to main
+                                                                         │
+                                                                         ▼
+                                              Next MCP session sees commit
+                                              mismatch via version.json probe
+                                              → cache invalidated → fresh data
 ```
 
-Concurrency is guarded — two pushes in quick succession won't race; the second waits for the first to finish.
+The workflow file is `cds-kb-data/.github/workflows/rebuild-on-push.yml`. It checks out `cds-kb-mcp@main` to get `enrich_index.mjs`, installs only `minisearch` (the script's one dep), and uses `$GITHUB_SHA` to stamp the version manifest. Concurrency-guarded: two quick pushes won't race.
 
-#### Manual — rebuild locally
-
-Useful when iterating on `enrich_index.mjs` itself, or in air-gapped setups.
+#### Manual rebuild (rare — for iterating on `enrich_index.mjs` itself, or air-gapped use)
 
 ```bash
 cd cds-kb-mcp
@@ -596,15 +587,24 @@ git commit -m "data: <what changed>"
 git push
 ```
 
-#### How clients see updates
+If you change `enrich_index.mjs` in *this* repo, trigger the data-repo workflow manually afterwards so it rebuilds with your new logic: data-repo → Actions tab → "Rebuild search index on data change" → **Run workflow** button.
 
-On every MCP startup the server fetches `<base>/index/version.json` (~200 B). If the upstream `commit` differs from what was cached on the previous run, the cache is invalidated and the index is re-downloaded. Result: a new data push is visible to every client by the next time they open a session — usually within seconds.
+#### What clients see
 
-If you ever need to force a refresh in a running session:
+On every MCP startup the server fetches `<base>/index/version.json` (~200 B, bypasses TTL). When the upstream `commit` differs from what was cached on the previous run, the cache is invalidated and the index is re-downloaded. Result: every new data push is visible to every client on their next session — usually within seconds. The server logs the transition explicitly:
 
-```bash
-CDS_KB_REFRESH=1 node dist/cds-kb-mcp.mjs
 ```
+[cds-kb-mcp] upstream commit a1b2c3d4 ≠ cached deadbeef — refreshing index
+```
+
+#### Client-side troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `kb_info` shows an old `commit` | Restart the MCP host (Claude Code / Desktop). Cache probe only runs at startup. |
+| Cache feels stuck | `rm -rf ~/.cache/cds-kb/` then restart |
+| Need an immediate refresh in this session | `CDS_KB_REFRESH=1 node dist/cds-kb-mcp.mjs` |
+| `kb_info` shows `commit: (no version manifest)` | The data source is an older snapshot without `version.json`. Either pull a fresh `cds-kb-data`, or wait for the next 1-hour TTL (legacy fallback). |
 
 ---
 
