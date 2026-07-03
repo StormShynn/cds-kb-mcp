@@ -66,7 +66,7 @@ Add this block to your `mcpServers` configuration file (e.g., `claude_desktop_co
         "-y",
         "supergateway@2.0.0",
         "--sse",
-        "https://cds-kb-mcp.cfapps.ap21.hana.ondemand.com/sse"
+        "https://cds-kb-mcp-production.up.railway.app/sse"
       ]
     }
   }
@@ -90,7 +90,7 @@ Best for enterprise environments behind corporate firewalls, VPNs, or proxy serv
          "command": "supergateway",
          "args": [
            "--sse",
-           "https://cds-kb-mcp.cfapps.ap21.hana.ondemand.com/sse"
+           "https://cds-kb-mcp-production.up.railway.app/sse"
          ]
        }
      }
